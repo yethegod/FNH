@@ -13,7 +13,7 @@ def FHN_rhs(t,x):
 
     return out
 
-def get_data(N,T=1000):
+def get_data(N,T=500):
     data_x = []
     data_y = []
     for i in range(N):

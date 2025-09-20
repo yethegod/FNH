@@ -1,0 +1,7 @@
+# Ignore text outputs in the result folder
+result/*.txt
+result/**/*.txt
+
+# Ignore Python bytecode caches everywhere
+__pycache__/
+**/__pycache__/

@@ -10,7 +10,7 @@ import argparse
 
 parser = argparse.ArgumentParser(description='training parameters')
 
-parser.add_argument('--nhid', type=int, default=16,
+parser.add_argument('--nhid', type=int, default=128,
                     help='hidden size')
 parser.add_argument('--epochs', type=int, default=400,
                     help='max epochs')
@@ -85,11 +85,11 @@ for epoch in range(args.epochs):
         final_test_loss = test_loss
 
     Path('result').mkdir(parents=True, exist_ok=True)
-    f = open('result/FitzHughNagumo_log.txt', 'a')
+    f = open('result/FNH_LEM.txt', 'a')
     f.write('eval loss: ' + str(valid_loss) + '\n')
     f.close()
 
-f = open('result/FitzHughNagumo_log.txt', 'a')
+f = open('result/FNH_LEM.txt', 'a')
 f.write('final test loss: ' + str(final_test_loss) + '\n')
 f.close()
 
