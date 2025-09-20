@@ -1,114 +1,153 @@
-from torch import nn, optim, Tensor
-import torch
-import torch.nn.utils
-import numpy as np
-from pathlib import Path
-from torch.utils.data import DataLoader, TensorDataset
 import argparse
+from pathlib import Path
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
 
 import data
-from network import RNNODE, OutputNN
+from RNN_ODE_functions import train_non_adap_models, fit_non_adap_models_grids
 
 
-parser = argparse.ArgumentParser(description='training parameters (RNN-ODE to mimic LEM loop)')
-parser.add_argument('--nhid', type=int, default=16, help='hidden/latent size')
-parser.add_argument('--epochs', type=int, default=400, help='max epochs')
-parser.add_argument('--device', type=str, default=torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-                    help='computing device')
-parser.add_argument('--batch', type=int, default=32, help='batch size')
-parser.add_argument('--lr', type=float, default=0.00904, help='learning rate')
-parser.add_argument('--seed', type=int, default=1234, help='random seed')
+class WindowDataset(Dataset):
+    def __init__(self, windows: torch.Tensor, ts: torch.Tensor):
+        self.windows = windows
+        self.ts = ts
 
-args = parser.parse_args()
-print(args)
+    def __len__(self) -> int:
+        return self.windows.shape[0]
 
-ninp = 1
-nout = 1
-
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-torch.manual_seed(args.seed)
-np.random.seed(args.seed)
-
-# Generate data exactly as in FitzHughNagumo_task (v_t -> v_{t+1})
-train_x, train_y = data.get_data(128)
-valid_x, valid_y = data.get_data(128)
-test_x, test_y = data.get_data(1024)
-print('Finished generating data')
-
-# Datasets/loaders identical to LEM setup
-train_dataset = TensorDataset(Tensor(train_x).float(), Tensor(train_y).float())
-trainloader = DataLoader(train_dataset, shuffle=True, batch_size=args.batch)
-
-valid_dataset = TensorDataset(Tensor(valid_x).float(), Tensor(valid_y).float())
-validloader = DataLoader(valid_dataset, shuffle=False, batch_size=128)
-
-test_dataset = TensorDataset(Tensor(test_x).float(), Tensor(test_y).float())
-testloader = DataLoader(test_dataset, shuffle=False, batch_size=128)
-
-# Build RNN-ODE components
-odefunc = RNNODE(input_dim=ninp, n_latent=args.nhid, n_hidden=args.nhid).to(args.device)
-outputfunc = OutputNN(input_dim=nout, n_latent=args.nhid).to(args.device)
-
-objective = nn.MSELoss()
-optimizer = optim.Adam(list(odefunc.parameters()) + list(outputfunc.parameters()), lr=args.lr)
+    def __getitem__(self, idx):
+        return self.windows[idx], self.ts[idx]
 
 
-def forward_roll(x_seq):
-    """
-    Unroll RNN-ODE across time with simple forward Euler (dt=1),
-    mirroring LEM’s per-step prediction: given x_t, predict x_{t+1}.
-    - x_seq: Tensor [T, B, ninp]
-    Returns: Tensor [T, B, nout]
-    """
-    T, B, _ = x_seq.shape
-    h = torch.zeros(B, args.nhid, device=x_seq.device)
-    outs = []
-    for t in range(T):
-        x_t = x_seq[t]
-        h = h + odefunc(t=torch.tensor(0.0, device=x_seq.device), x=x_t, h=h)
-        yhat = outputfunc(h)
-        outs.append(yhat)
-    return torch.stack(outs, dim=0)
+def build_time_grid(num_samples: int, num_steps: int, t_end: float = 400.0) -> torch.Tensor:
+    base_ts = torch.linspace(0.0, t_end, num_steps + 1, dtype=torch.float32)[:-1]
+    return base_ts.unsqueeze(0).repeat(num_samples, 1)
 
 
-def eval_loop(dataloader):
-    odefunc.eval()
-    outputfunc.eval()
-    with torch.no_grad():
-        for x, y in dataloader:
-            y = y.permute(1, 0, 2).to(args.device)  # [T,B,1]
-            x = x.permute(1, 0, 2).to(args.device)  # [T,B,1]
-            out = forward_roll(x)
-            loss = torch.sqrt(objective(out, y)).item()
-    return loss
+def main():
+    parser = argparse.ArgumentParser(description='Train RNN-ODE using helper utilities (LEM comparison ground).')
+    parser.add_argument('--nhid', type=int, default=128, help='latent/hidden size (matches LEM baseline)')
+    parser.add_argument('--epochs', type=int, default=400, help='number of training iterations')
+    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
+                        help='computing device')
+    parser.add_argument('--batch', type=int, default=32, help='batch size (same as LEM setup)')
+    parser.add_argument('--lr', type=float, default=0.00904, help='learning rate used in spiral_example')
+    parser.add_argument('--seed', type=int, default=1234, help='random seed')
+    args = parser.parse_args()
+    args.device = torch.device(args.device)
+    print(args)
 
+    ninp = 1
 
-best_loss = float('inf')
-for epoch in range(args.epochs):
-    odefunc.train()
-    outputfunc.train()
-    for x, y in trainloader:
-        y = y.permute(1, 0, 2).to(args.device)
-        x = x.permute(1, 0, 2).to(args.device)
-        optimizer.zero_grad()
-        out = forward_roll(x)
-        loss = objective(out, y)
-        loss.backward()
-        optimizer.step()
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
-    valid_loss = eval_loop(validloader)
-    test_loss = eval_loop(testloader)
-    if valid_loss < best_loss:
-        best_loss = valid_loss
-        final_test_loss = test_loss
+    # Generate FitzHugh–Nagumo data as in the LEM baseline
+    train_x, _ = data.get_data(128)
+    valid_x, _ = data.get_data(128)
+    test_x, _ = data.get_data(1024)
+    print('Finished generating data')
+
+    train_windows = torch.from_numpy(train_x).float()
+    valid_windows = torch.from_numpy(valid_x).float()
+    test_windows = torch.from_numpy(test_x).float()
+
+    num_steps = train_windows.shape[1]
+    train_ts = build_time_grid(train_windows.shape[0], num_steps)
+    valid_ts = build_time_grid(valid_windows.shape[0], num_steps)
+    test_ts = build_time_grid(test_windows.shape[0], num_steps)
+
+    buffer_start_steps = 2
+    time_scale = 10.0
+    method = 'naiveEuler'
+    verbose = 1
+    rescale_const = 1.0
+    thres1 = 6.5e3
+    thres2 = 6.5e3
+    weight = (1, 0)
+    num_grids = num_steps
+
+    # Apply buffer timestamp shift (same trick as notebook helper)
+    if buffer_start_steps > 0:
+        deltat = train_ts[0, -1] - train_ts[0, -2]
+        shift = torch.arange(-deltat * buffer_start_steps, 0, deltat, dtype=train_ts.dtype)
+        train_ts = train_ts.clone()
+        train_ts[:, :buffer_start_steps] = train_ts[:, :buffer_start_steps] + shift
+
+    train_dataset = WindowDataset(train_windows, train_ts)
+    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=args.batch)
+    input_steps = train_windows.shape[1]
+
+    flag, odefunc, outputfunc = train_non_adap_models(
+        train_loader,
+        input_steps,
+        valid_windows,
+        valid_ts,
+        num_grids,
+        verbose,
+        lr=args.lr,
+        n_iter=args.epochs,
+        method=method,
+        thres1=thres1,
+        thres2=thres2,
+        weight=weight,
+        obs_dim=ninp,
+        n_hidden=args.nhid,
+        n_latent=args.nhid,
+        num_train_windows=train_windows.shape[0],
+        time_scale=time_scale,
+        buffer_start_steps=buffer_start_steps,
+        rescale_const=rescale_const,
+        device=args.device,
+    )
+
+    if not flag:
+        raise SystemExit('Training failed: loss thresholds exceeded.')
+
+    # Validation RMSE (fit metric) using helper routine
+    _, valid_rmse_tensor, _ = fit_non_adap_models_grids(
+        odefunc,
+        outputfunc,
+        valid_windows,
+        valid_ts,
+        num_grids,
+        method=method,
+        buffer_start_steps=buffer_start_steps,
+        n_latent=args.nhid,
+        obs_dim=ninp,
+        rescale_const=rescale_const,
+        time_scale=time_scale,
+    )
+    valid_rmse = valid_rmse_tensor.mean().item()
+
+    # Test RMSE on large holdout set
+    _, test_rmse_tensor, _ = fit_non_adap_models_grids(
+        odefunc,
+        outputfunc,
+        test_windows,
+        test_ts,
+        num_grids,
+        method=method,
+        buffer_start_steps=buffer_start_steps,
+        n_latent=args.nhid,
+        obs_dim=ninp,
+        rescale_const=rescale_const,
+        time_scale=time_scale,
+    )
+    test_rmse = test_rmse_tensor.mean().item()
 
     Path('result').mkdir(parents=True, exist_ok=True)
     with open('result/FNH_RNN_ODE.txt', 'a') as f:
-        f.write('eval loss: ' + str(valid_loss) + '\n')
+        f.write(f'valid rmse: {valid_rmse}\n')
+        f.write(f'test rmse: {test_rmse}\n')
 
-with open('result/FNH_RNN_ODE.txt', 'a') as f:
-    f.write('final test loss: ' + str(final_test_loss) + '\n')
+    print('Done training RNN-ODE via helper utilities.')
+    print(f'Validation RMSE: {valid_rmse:.6f}, Test RMSE: {test_rmse:.6f}')
 
-print('Done training RNN-ODE (LEM-style loss). Best valid sqrt(MSE):', best_loss)
 
+if __name__ == '__main__':
+    main()

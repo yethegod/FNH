@@ -153,9 +153,20 @@ def pred_non_adap_models_grids(odefunc, outputfunc, window_orig, ts_orig, num_gr
 def train_non_adap_models(train_dataloader, input_steps, valid_window, valid_ts, num_grid,
                            verbose, lr=1e-2, n_iter=400, n_latent=128, num_train_windows=500,
                            n_hidden=128, obs_dim=1, thres1=1e5, thres2=1e3, weight=(1, 10),
-                           method="naiveEuler", rescale_const=1, time_scale=10, buffer_start_steps=2):
-    odefunc = RNNODE(input_dim=obs_dim, n_latent=n_latent, n_hidden=n_hidden)
-    outputfunc = OutputNN(input_dim=obs_dim, n_latent=n_latent)
+                           method="naiveEuler", rescale_const=1, time_scale=10, buffer_start_steps=2,
+                           device=None):
+    """Train RNN-ODE with optional GPU acceleration.
+
+    - Move models and batch tensors to `device` during training.
+    - Validation helpers rely on SciPy (CPU). We evaluate on CPU by cloning
+      the current GPU model weights to CPU models each epoch (cheap compared
+      to training), avoiding device thrashing.
+    """
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    odefunc = RNNODE(input_dim=obs_dim, n_latent=n_latent, n_hidden=n_hidden).to(device)
+    outputfunc = OutputNN(input_dim=obs_dim, n_latent=n_latent).to(device)
     params = list(odefunc.parameters()) + list(outputfunc.parameters())
     opt = optim.Adam(params, lr=lr)
     train_loss = []
@@ -167,9 +178,9 @@ def train_non_adap_models(train_dataloader, input_steps, valid_window, valid_ts,
         loss_epoch = 0.
         for batch_idx, samples in enumerate(train_dataloader):
 
-            samples, train_ts_temp = samples[0], samples[1]
-            h0 = torch.zeros(samples.shape[0], n_latent)
-            loss = torch.tensor(0.0, dtype=torch.float, requires_grad=True)
+            samples, train_ts_temp = samples[0].to(device), samples[1].to(device)
+            h0 = torch.zeros(samples.shape[0], n_latent, device=device)
+            loss = torch.tensor(0.0, dtype=torch.float, requires_grad=True, device=device)
             opt.zero_grad()
             for t_ind in range(input_steps - 1):
                 x_temp = samples[:, t_ind, :] * rescale_const
@@ -191,7 +202,13 @@ def train_non_adap_models(train_dataloader, input_steps, valid_window, valid_ts,
             loss.backward()
             opt.step()
 
-        _, valid_loss2, _ = fit_non_adap_models_grids(odefunc, outputfunc, valid_window, valid_ts, num_grid,
+        # Clone models to CPU for validation (SciPy interpolation runs on CPU)
+        odefunc_cpu = RNNODE(input_dim=obs_dim, n_latent=n_latent, n_hidden=n_hidden).cpu()
+        outputfunc_cpu = OutputNN(input_dim=obs_dim, n_latent=n_latent).cpu()
+        odefunc_cpu.load_state_dict(odefunc.state_dict())
+        outputfunc_cpu.load_state_dict(outputfunc.state_dict())
+
+        _, valid_loss2, _ = fit_non_adap_models_grids(odefunc_cpu, outputfunc_cpu, valid_window, valid_ts, num_grid,
                                                       buffer_start_steps=buffer_start_steps, verbose=0,
                                                       rescale_const=rescale_const,
                                                       obs_dim=obs_dim, n_latent=n_latent, time_scale=time_scale)
@@ -216,7 +233,7 @@ def train_non_adap_models(train_dataloader, input_steps, valid_window, valid_ts,
 
     t3 = time.time()
 
-    [odefunc, outputfunc] = torch.load('saved_model2.pth')
+    [odefunc, outputfunc] = torch.load('saved_model2.pth', map_location='cpu')
 
     _, valid_loss2, _ = fit_non_adap_models_grids(odefunc, outputfunc, valid_window, valid_ts, num_grid,
                                                   buffer_start_steps=buffer_start_steps, verbose=0,
