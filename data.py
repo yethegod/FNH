@@ -37,7 +37,7 @@ def FHN_rhs_rescaled(tau, y_tilde):
     return np.array([dv_dt_tilde, dw_dt_tilde])
 
 
-def get_data(N, T=500):
+def get_data(N, T=64):
     data_x = []
     data_y = []
 
