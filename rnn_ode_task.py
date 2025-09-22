@@ -33,7 +33,7 @@ def main():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
                         help='computing device')
     parser.add_argument('--batch', type=int, default=32, help='batch size (same as LEM setup)')
-    parser.add_argument('--lr', type=float, default=0.00904, help='learning rate used in spiral_example')
+    parser.add_argument('--lr', type=float, default=0.01, help='learning rate used in spiral_example')
     parser.add_argument('--seed', type=int, default=1234, help='random seed')
     args = parser.parse_args()
     args.device = torch.device(args.device)
